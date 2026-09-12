@@ -1,0 +1,6 @@
+{
+  "name": "aurumRates",
+  "description": "Live daily 24K, 22K, 18K gold and silver rates with a clean bullion desk display and secure admin manager.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
