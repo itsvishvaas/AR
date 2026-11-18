@@ -3,7 +3,7 @@ import { DailyRates, RateHistoryItem, StoreInfo, MetalType } from '../types';
 const RATES_STORAGE_KEY = 'aurum_rates_v3';
 const HISTORY_STORAGE_KEY = 'aurum_rates_history_v3';
 const STORE_INFO_STORAGE_KEY = 'aurum_rates_store_info_v2';
-const AUTH_STORAGE_KEY = 'aurum_rates_admin_auth';
+const AUTH_TOKEN_STORAGE_KEY = 'aurum_rates_admin_token';
 
 export const DEFAULT_RATES: DailyRates = {
   gold24k: 15000,
@@ -16,7 +16,6 @@ export const DEFAULT_RATES: DailyRates = {
 
 export const PERMANENT_ADMIN_USERNAME = 'admin1';
 export const PERMANENT_ADMIN_EMAIL = 'admin@gmail.com';
-export const PERMANENT_ADMIN_PASSWORD = 'admin@987';
 
 export const DEFAULT_STORE_INFO: StoreInfo = {
   storeName: 'aurumRates',
@@ -172,8 +171,6 @@ export function updateSingleMetalRate(
     updatedAtISO: new Date().toISOString(),
   };
 
-  saveRates(updatedRates);
-
   // Check if today already has an entry in history
   const updatedHistory = [...currentHistory];
   const existingTodayIndex = updatedHistory.findIndex(h => h.date === todayShort);
@@ -199,7 +196,6 @@ export function updateSingleMetalRate(
     });
   }
 
-  saveHistory(updatedHistory);
   return { updatedRates, updatedHistory };
 }
 
@@ -218,8 +214,6 @@ export function updateAllDailyRates(
     lastUpdated: nowFormatted,
     updatedAtISO: new Date().toISOString(),
   };
-
-  saveRates(updatedRates);
 
   const updatedHistory = [...currentHistory];
   const existingTodayIndex = updatedHistory.findIndex(h => h.date === todayShort);
@@ -245,27 +239,110 @@ export function updateAllDailyRates(
     });
   }
 
-  saveHistory(updatedHistory);
   return { updatedRates, updatedHistory };
 }
 
-// Admin Auth Helper
-export function checkIsAdminAuthenticated(): boolean {
+// ---------------------------------------------------------------------------
+// Shared server storage (Netlify Database via /api). The values in
+// localStorage are only a cache so the page renders instantly; the server
+// copy is the source of truth for every device.
+// ---------------------------------------------------------------------------
+
+export interface SiteData {
+  rates: DailyRates;
+  history: RateHistoryItem[];
+  storeInfo: StoreInfo;
+}
+
+export async function fetchSiteData(): Promise<SiteData | null> {
   try {
-    return localStorage.getItem(AUTH_STORAGE_KEY) === 'true';
-  } catch {
-    return false;
+    const res = await fetch('/api/site-data', { cache: 'no-store' });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const result: SiteData = {
+      rates: data.rates ?? DEFAULT_RATES,
+      history: Array.isArray(data.history) && data.history.length > 0 ? data.history : INITIAL_HISTORY,
+      storeInfo: { ...DEFAULT_STORE_INFO, ...(data.storeInfo ?? {}) },
+    };
+    saveRates(result.rates);
+    saveHistory(result.history);
+    saveStoreInfo(result.storeInfo);
+    return result;
+  } catch (err) {
+    console.error('Error fetching site data:', err);
+    return null;
   }
 }
 
-export function setAdminAuth(isAuth: boolean): void {
+export class AuthExpiredError extends Error {}
+
+export async function saveSiteData(partial: Partial<SiteData>): Promise<void> {
+  const res = await fetch('/api/site-data', {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${getAdminToken() ?? ''}`,
+    },
+    body: JSON.stringify(partial),
+  });
+  if (res.status === 401) {
+    setAdminToken(null);
+    throw new AuthExpiredError('Your session has expired. Please sign in again.');
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || 'Failed to save changes. Please try again.');
+  }
+  if (partial.rates) saveRates(partial.rates);
+  if (partial.history) saveHistory(partial.history);
+  if (partial.storeInfo) saveStoreInfo(partial.storeInfo);
+}
+
+// Admin Auth Helpers (session token issued by the server)
+export function getAdminToken(): string | null {
   try {
-    if (isAuth) {
-      localStorage.setItem(AUTH_STORAGE_KEY, 'true');
-    } else {
-      localStorage.removeItem(AUTH_STORAGE_KEY);
-    }
+    return localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setAdminToken(token: string | null): void {
+  try {
+    if (token) localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+    else localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    localStorage.removeItem('aurum_rates_admin_auth');
   } catch (err) {
     console.error('Auth storage error:', err);
   }
+}
+
+export function checkIsAdminAuthenticated(): boolean {
+  return !!getAdminToken();
+}
+
+export async function verifyAdminSession(): Promise<boolean> {
+  const token = getAdminToken();
+  if (!token) return false;
+  try {
+    const res = await fetch('/api/session', { headers: { Authorization: `Bearer ${token}` } });
+    const data = await res.json();
+    if (!data.valid) setAdminToken(null);
+    return !!data.valid;
+  } catch {
+    return true; // offline: keep the local session, the server re-checks on save
+  }
+}
+
+export async function loginAdmin(username: string, password: string): Promise<void> {
+  const res = await fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.token) {
+    throw new Error(data.error || 'Login failed. Please try again.');
+  }
+  setAdminToken(data.token);
 }

@@ -5,10 +5,9 @@ import {
   updateSingleMetalRate,
   updateAllDailyRates,
   formatCurrentTimestamp,
-  saveStoreInfo,
+  loginAdmin,
   PERMANENT_ADMIN_USERNAME,
   PERMANENT_ADMIN_EMAIL,
-  PERMANENT_ADMIN_PASSWORD
 } from '../utils/storage';
 import {
   Lock,
@@ -33,11 +32,11 @@ interface AdminPanelProps {
   isOpen: boolean;
   onClose: () => void;
   rates: DailyRates;
-  onRatesUpdated: (newRates: DailyRates, newHistory: RateHistoryItem[]) => void;
+  onRatesUpdated: (newRates: DailyRates, newHistory: RateHistoryItem[]) => Promise<void>;
   history: RateHistoryItem[];
-  onHistoryUpdated: (newHistory: RateHistoryItem[]) => void;
+  onHistoryUpdated: (newHistory: RateHistoryItem[]) => Promise<void>;
   storeInfo: StoreInfo;
-  onStoreInfoUpdated: (newInfo: StoreInfo) => void;
+  onStoreInfoUpdated: (newInfo: StoreInfo) => Promise<void>;
   isAdminLoggedIn: boolean;
   setIsAdminLoggedIn: (isAuth: boolean) => void;
 }
@@ -58,6 +57,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authError, setAuthError] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   // Active Tab
   const [activeTab, setActiveTab] = useState<'rates' | 'store' | 'history'>('rates');
@@ -89,31 +90,36 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setTimeout(() => setFeedbackMessage(null), 3500);
   };
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
-
-    const inputUser = authEmail.trim().toLowerCase();
-    const inputPass = authPassword.trim();
-
-    // Permanent Backend Authentication (Fixed and immutable from frontend)
-    const validUser = inputUser === PERMANENT_ADMIN_USERNAME.toLowerCase() || inputUser === PERMANENT_ADMIN_EMAIL.toLowerCase();
-    const validPass = inputPass === PERMANENT_ADMIN_PASSWORD;
-
-    if (validUser && validPass) {
+    setIsLoggingIn(true);
+    try {
+      await loginAdmin(authEmail.trim(), authPassword);
+      setAuthPassword('');
       setIsAdminLoggedIn(true);
-      setAuthError('');
       showNotification('Successfully logged in as Administrator.');
-    } else {
-      setAuthError(`Invalid credentials. Please enter authorized username "${PERMANENT_ADMIN_USERNAME}" and password.`);
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'Login failed. Please try again.');
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 
-  const handleQuickDemoLogin = () => {
-    setAuthEmail(PERMANENT_ADMIN_USERNAME);
-    setAuthPassword(PERMANENT_ADMIN_PASSWORD);
-    setIsAdminLoggedIn(true);
-    showNotification('Logged in with permanent backend credentials.');
+  // Runs a save against the server and reports success or failure.
+  const runSave = async (save: () => Promise<void>, successText: string): Promise<boolean> => {
+    if (isSaving) return false;
+    setIsSaving(true);
+    try {
+      await save();
+      showNotification(successText);
+      return true;
+    } catch (err) {
+      showNotification(err instanceof Error ? err.message : 'Failed to save changes.', 'error');
+      return false;
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleLogout = () => {
@@ -131,8 +137,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
 
     const { updatedRates, updatedHistory } = updateSingleMetalRate(metalKey, num, rates, history);
-    onRatesUpdated(updatedRates, updatedHistory);
-    showNotification(`${metalLabel} updated to ₹${formatIndianCurrency(num)}/g. Website & timestamp refreshed!`);
+    runSave(
+      () => onRatesUpdated(updatedRates, updatedHistory),
+      `${metalLabel} updated to ₹${formatIndianCurrency(num)}/g. Website & timestamp refreshed!`
+    );
   };
 
   // Update all rates at once
@@ -152,8 +160,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       { gold24k: g24, gold22k: g22, gold18k: g18, silver: sil },
       history
     );
-    onRatesUpdated(updatedRates, updatedHistory);
-    showNotification('All Gold & Silver rates updated successfully! Public website refreshed.');
+    runSave(
+      () => onRatesUpdated(updatedRates, updatedHistory),
+      'All Gold & Silver rates updated successfully! Public website refreshed.'
+    );
   };
 
   // Auto-calculate 22K and 18K based on 24K pure rate
@@ -176,13 +186,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   // Save Store Info
   const handleSaveStoreInfo = (e: React.FormEvent) => {
     e.preventDefault();
-    saveStoreInfo(editStoreInfo);
-    onStoreInfoUpdated(editStoreInfo);
-    showNotification('Store profile & contact details updated successfully.');
+    runSave(() => onStoreInfoUpdated(editStoreInfo), 'Store profile & contact details updated successfully.');
   };
 
   // Add Manual History Entry
-  const handleAddHistoryRecord = (e: React.FormEvent) => {
+  const handleAddHistoryRecord = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newHistDate || !newHist24k || !newHist22k || !newHist18k || !newHistSilver) {
       showNotification('Please fill in all fields for the historical record.', 'error');
@@ -200,21 +208,20 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     };
 
     const updated = [newRecord, ...history];
-    onHistoryUpdated(updated);
+    const ok = await runSave(() => onHistoryUpdated(updated), 'Historical entry added successfully.');
+    if (!ok) return;
     setShowAddHistory(false);
     setNewHistDate('');
     setNewHist24k('');
     setNewHist22k('');
     setNewHist18k('');
     setNewHistSilver('');
-    showNotification('Historical entry added successfully.');
   };
 
   // Delete History Record
   const handleDeleteHistoryRecord = (id: string) => {
     const updated = history.filter((h) => h.id !== id);
-    onHistoryUpdated(updated);
-    showNotification('Historical record removed.');
+    runSave(() => onHistoryUpdated(updated), 'Historical record removed.');
   };
 
   return (
@@ -332,33 +339,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
                 <button
                   type="submit"
-                  className="w-full py-3 px-4 bg-gradient-to-r from-[#C9A227] to-[#E6C96A] hover:brightness-105 text-[#111111] font-bold text-sm rounded-xl shadow-lg shadow-[#C9A227]/20 transition-all active:scale-95"
+                  disabled={isLoggingIn}
+                  className="w-full py-3 px-4 bg-gradient-to-r from-[#C9A227] to-[#E6C96A] hover:brightness-105 text-[#111111] font-bold text-sm rounded-xl shadow-lg shadow-[#C9A227]/20 transition-all active:scale-95 disabled:opacity-60"
                 >
-                  Sign In to Dashboard
+                  {isLoggingIn ? 'Signing In…' : 'Sign In to Dashboard'}
                 </button>
               </form>
 
-              {/* Permanent Backend Credentials Box */}
-              <div className="p-4 rounded-xl bg-white/5 border border-white/10 text-xs text-white/70 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-[#E6C96A]">Permanent Admin Credentials:</span>
-                  <button
-                    type="button"
-                    onClick={handleQuickDemoLogin}
-                    className="text-[11px] text-[#E6C96A] hover:underline font-bold"
-                  >
-                    Auto-Fill Credentials →
-                  </button>
-                </div>
-                <div className="font-mono text-[11px] text-white/80 flex flex-wrap items-center gap-x-3 gap-y-1">
-                  <span>Username: <strong className="text-white">admin1</strong></span>
-                  <span>Email: <strong className="text-white">admin@gmail.com</strong></span>
-                  <span>Password: <strong className="text-white">admin@987</strong></span>
-                </div>
-                <p className="text-[10px] text-amber-300/80 leading-tight">
-                  Security notice: Permanent backend credentials. No changes can be made from frontend; modification is restricted to backend source code.
-                </p>
-              </div>
+              <p className="text-[11px] text-center text-white/50">
+                Changes you save here are stored online and appear on every device.
+              </p>
             </div>
           ) : (
             /* Authenticated Admin Dashboard */
@@ -763,9 +753,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       <div className="space-y-0.5">
                         <span className="font-bold text-white">Permanent Admin Security Configuration</span>
                         <p className="text-[11px] text-slate-400">
-                          Username: <span className="font-mono text-[#E6C96A] font-bold">{PERMANENT_ADMIN_USERNAME}</span> | Email: <span className="font-mono text-[#E6C96A] font-bold">{PERMANENT_ADMIN_EMAIL}</span> | Password: <span className="font-mono text-[#E6C96A] font-bold">{PERMANENT_ADMIN_PASSWORD}</span>.
+                          Username: <span className="font-mono text-[#E6C96A] font-bold">{PERMANENT_ADMIN_USERNAME}</span> | Email: <span className="font-mono text-[#E6C96A] font-bold">{PERMANENT_ADMIN_EMAIL}</span> | .
                           <br />
-                          <span className="text-amber-300/90 font-medium">Notice: Authentication credentials cannot be modified via frontend; they are permanently locked to backend source code.</span>
+                          <span className="text-amber-300/90 font-medium">The admin password is set securely in Netlify (ADMIN_PASSWORD) and is never shown on the website.</span>
                         </p>
                       </div>
                     </div>
