@@ -3,14 +3,18 @@
  * Inspired by clean professional rate boards (like DP Gold & CapsGold)
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { DailyRates, StoreInfo, RateHistoryItem } from './types';
 import {
   getStoredRates,
   getStoredHistory,
   getStoredStoreInfo,
   checkIsAdminAuthenticated,
-  setAdminAuth,
+  setAdminToken,
+  fetchSiteData,
+  saveSiteData,
+  verifyAdminSession,
+  AuthExpiredError,
 } from './utils/storage';
 import { AurumRatesDisplay } from './components/AurumRatesDisplay';
 import { AdminPanel } from './components/AdminPanel';
@@ -22,21 +26,53 @@ export default function App() {
   const [isAdminLoggedIn, setIsAdminLoggedInState] = useState<boolean>(() => checkIsAdminAuthenticated());
   const [isAdminOpen, setIsAdminOpen] = useState(false);
 
+  // Load the shared data from the server so every device shows the same settings.
+  useEffect(() => {
+    let cancelled = false;
+    fetchSiteData().then((data) => {
+      if (cancelled || !data) return;
+      setRates(data.rates);
+      setHistory(data.history);
+      setStoreInfo(data.storeInfo);
+    });
+    if (checkIsAdminAuthenticated()) {
+      verifyAdminSession().then((valid) => {
+        if (!cancelled && !valid) setIsAdminLoggedInState(false);
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const setIsAdminLoggedIn = (isAuth: boolean) => {
     setIsAdminLoggedInState(isAuth);
-    setAdminAuth(isAuth);
+    if (!isAuth) setAdminToken(null);
   };
 
-  const handleRatesUpdated = (newRates: DailyRates, newHistory: RateHistoryItem[]) => {
+  // Saves to the server; throws on failure so the admin panel can show the error.
+  const persist = async (partial: Parameters<typeof saveSiteData>[0]) => {
+    try {
+      await saveSiteData(partial);
+    } catch (err) {
+      if (err instanceof AuthExpiredError) setIsAdminLoggedInState(false);
+      throw err;
+    }
+  };
+
+  const handleRatesUpdated = async (newRates: DailyRates, newHistory: RateHistoryItem[]) => {
+    await persist({ rates: newRates, history: newHistory });
     setRates(newRates);
     setHistory(newHistory);
   };
 
-  const handleHistoryUpdated = (newHistory: RateHistoryItem[]) => {
+  const handleHistoryUpdated = async (newHistory: RateHistoryItem[]) => {
+    await persist({ history: newHistory });
     setHistory(newHistory);
   };
 
-  const handleStoreInfoUpdated = (newInfo: StoreInfo) => {
+  const handleStoreInfoUpdated = async (newInfo: StoreInfo) => {
+    await persist({ storeInfo: newInfo });
     setStoreInfo(newInfo);
   };
 
